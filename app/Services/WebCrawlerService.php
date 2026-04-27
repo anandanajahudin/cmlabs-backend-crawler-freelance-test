@@ -196,26 +196,77 @@ class WebCrawlerService
     public function saveHtmlFile(string $url, string $filename): string
     {
         try {
-            // Create storage path if it doesn't exist
             $storagePath = storage_path('app/crawled-html');
             if (!File::exists($storagePath)) {
                 File::makeDirectory($storagePath, 0755, true);
             }
 
-            // Generate filename if not provided
             if (empty($filename)) {
                 $filename = $this->generateFilename($url);
             }
 
             $filePath = $storagePath . '/' . $filename;
 
-            // Save the HTML content
-            File::put($filePath, $this->htmlContent);
+            File::put($filePath, $this->processHtml($this->htmlContent, $url));
 
             return $filePath;
         } catch (Exception $e) {
             throw new Exception("Error saving HTML file: " . $e->getMessage());
         }
+    }
+
+    /**
+     * Process HTML: inject base tag so assets load from origin, then pretty-print
+     */
+    protected function processHtml(string $html, string $url): string
+    {
+        $parsed   = parse_url($url);
+        $origin   = $parsed['scheme'] . '://' . $parsed['host'];
+        $baseHref = rtrim($origin, '/') . '/';
+
+        // Inject <base> if not already present so relative CSS/images resolve correctly
+        if (stripos($html, '<base') === false) {
+            $baseTag = '<base href="' . htmlspecialchars($baseHref, ENT_QUOTES) . '">';
+            if (stripos($html, '<head>') !== false) {
+                $html = preg_replace('/<head>/i', '<head>' . $baseTag, $html, 1);
+            } elseif (stripos($html, '<head ') !== false) {
+                $html = preg_replace('/(<head[^>]*>)/i', '$1' . $baseTag, $html, 1);
+            } else {
+                $html = $baseTag . $html;
+            }
+        }
+
+        return $this->prettyPrintHtml($html);
+    }
+
+    /**
+     * Format HTML with consistent indentation using DOMDocument
+     */
+    protected function prettyPrintHtml(string $html): string
+    {
+        if (class_exists('tidy')) {
+            $tidy = new \tidy();
+            $tidy->parseString($html, [
+                'indent'         => true,
+                'indent-spaces'  => 2,
+                'wrap'           => 120,
+                'output-html'    => true,
+                'preserve-entities' => true,
+            ], 'utf8');
+            $tidy->cleanRepair();
+            return (string) $tidy;
+        }
+
+        // DOMDocument fallback
+        $doc = new \DOMDocument();
+        $doc->preserveWhiteSpace = false;
+        $doc->formatOutput       = true;
+        libxml_use_internal_errors(true);
+        $doc->loadHTML(mb_convert_encoding($html, 'HTML-ENTITIES', 'UTF-8'));
+        libxml_clear_errors();
+        $output = $doc->saveHTML();
+
+        return $output !== false ? $output : $html;
     }
 
     /**
